@@ -1,0 +1,76 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ "master" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Check EC2 Instance
+        id: check-ec2-instance
+        env:
+          INSTANCE_RUNNING: "running"
+          INSTANCE_STOPPED: "stopped"
+          INSTANCE_NAME: "r5-test"
+        run: |
+          INSTANCES_INFO=$(aws ec2 describe-instances \
+                     --filters "Name=tag:Name,Values=$INSTANCE_NAME" \
+                     --query 'Reservations[].Instances[].{PublicDnsName:PublicDnsName, PublicIpAddress:PublicIpAddress, Name:Tags[?Key==`Name`].Value | [0], State:State.Name}' \
+                     --output json
+                 )
+          INSTANCE_STATE=$(echo $INSTANCES_INFO | jq -r '.[0].State')
+          if [ "$INSTANCE_STATE" == "running" ]; then
+            echo "Instance is running."
+            echo "instance_running=true" >> $GITHUB_ENV
+            echo "public_dns=$(echo $INSTANCES_INFO | jq -r '.[0].PublicDnsName')" >> $GITHUB_ENV
+          else
+            echo "Instance is not running. Starting the instance..."
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=$INSTANCE_NAME" --query "Reservations[*].Instances[*].InstanceId" --output text)
+            aws ec2 start-instances --instance-ids $INSTANCE_ID
+            echo "instance_running=true" >> $GITHUB_ENV
+            echo "public_dns=$(echo $INSTANCES_INFO | jq -r '.[0].PublicDnsName')" >> $GITHUB_ENV
+          fi
+
+      - name: Deploy to EC2 Docker image
+        env:
+          REMOTE_DIR: "/home/ubuntu/r5_test"
+          ENVS_BUCKET_NAME: "r5-test-dev-envs"
+          ENVS_FILE: ".env"
+        uses: easingthemes/ssh-deploy@main
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          REMOTE_HOST: ${{ env.public_dns }}
+          REMOTE_USER: "ubuntu"
+          SOURCE: "."
+          TARGET: ${{ env.REMOTE_DIR }}
+          SCRIPT_BEFORE: |
+            docker compose down
+            sudo rm -rf ${{ env.REMOTE_DIR }}
+            sudo mkdir -p ${{ env.REMOTE_DIR }}
+            sudo chown ubuntu:ubuntu ${{ env.REMOTE_DIR }}
+          SCRIPT_AFTER: |
+            cd ${{ env.REMOTE_DIR }}
+            aws s3 cp s3://${{ env.ENVS_BUCKET_NAME }}/${{ env.ENVS_FILE }} ./${{ env.ENVS_FILE }}
+            docker compose build
+            docker compose up -d
+            echo -e "\033[0;32m${{ env.public_dns}}\033[0m"
+            echo "Deployed successfully!"
