@@ -1,0 +1,16 @@
+pydantic==2.5.2
+pymongo
+python-dotenv
+uvicorn
+fastapi
+pdbpp
+requests
+retry
+ipython
+pytest
+python-dateutil
+faker
+httpx
+aiohttp
+motor
+pytest-asyncio
